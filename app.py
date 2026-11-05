@@ -13,7 +13,7 @@ st.caption("Live AIS Tracking vs. Pro-Forma Schedule Delay Calculator")
 
 # Sidebar Configuration
 st.sidebar.header("Vessel Query & Credentials")
-API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="59b1c83a8504a344ffb4b008fc007b761c00131a")
+API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="YOUR_AISSTREAM_API_KEY_HERE")
 target_mmsi = st.sidebar.text_input("Vessel MMSI Number", value="255805678")
 carrier = st.sidebar.selectbox("Carrier", ["MSC", "Maersk", "CMA CGM", "Hapag-Lloyd"])
 scheduled_delay_hrs = st.sidebar.number_input("Current Known Delay (Hours)", min_value=0, max_value=120, value=38)
@@ -58,6 +58,15 @@ def get_live_vessel_data(mmsi_target, api_key):
         
     return latest_data
 
+# Initialize session state to remember the last known position across clicks
+if "vessel_cache" not in st.session_state:
+    st.session_state.vessel_cache = {
+        "lat": 51.45,
+        "lon": 0.50,
+        "ship_name": "No vessel loaded yet",
+        "sog": "0.0"
+    }
+
 # Historical Baseline Lookup Data
 historical_data = {
     "MSC": {"delay_threshold": 36, "base_omission_rate": 0.65, "barge_delay_days": 3.5},
@@ -80,23 +89,23 @@ def calculate_risk(delay, stats):
 diversion_prob = calculate_risk(scheduled_delay_hrs, carrier_stats)
 
 # Trigger Live Fetch via Button
-live_result = None
-if st.sidebar.button("Fetch Live AIS Position"):
+if st.sidebar.button("Fetch Last Known / Live Position"):
     if API_KEY == "YOUR_AISSTREAM_API_KEY_HERE" or not API_KEY:
         st.warning("Please enter a valid Aisstream API key in the sidebar.")
     else:
-        with st.spinner("Connecting to live AIS satellite/terrestrial stream..."):
+        with st.spinner("Querying AIS stream for latest position report..."):
             live_result = get_live_vessel_data(target_mmsi, API_KEY)
-            if live_result:
-                st.success(f"Successfully tracked: {live_result['ship_name']}")
+            if live_result and live_result.get('lat'):
+                st.session_state.vessel_cache = live_result
+                st.success(f"Updated position for: {live_result['ship_name']}")
             else:
-                st.warning("No recent signal found for this MMSI. Ensure the ship is currently active.")
+                st.info("Live ping timed out. Holding onto the last known position from cache.")
 
-# Default coordinates if live fetch hasn't occurred yet
-vessel_lat = live_result['lat'] if live_result and live_result['lat'] else 50.123
-vessel_lon = live_result['lon'] if live_result and live_result['lon'] else -0.456
-vessel_name_display = live_result['ship_name'] if live_result and live_result['ship_name'] else f"IMO / MMSI: {target_mmsi}"
-current_speed = f"{live_result['sog']} knots" if live_result and 'sog' in live_result else "Unknown (Click Fetch)"
+# Use cached coordinates so the map never breaks
+vessel_lat = st.session_state.vessel_cache['lat']
+vessel_lon = st.session_state.vessel_cache['lon']
+vessel_name_display = st.session_state.vessel_cache['ship_name']
+current_speed = f"{st.session_state.vessel_cache.get('sog', '0')} knots"
 
 # Dashboard Metrics Display
 col1, col2, col3 = st.columns(3)
