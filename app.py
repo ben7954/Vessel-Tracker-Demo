@@ -1,3 +1,5 @@
+import json
+import websocket
 import streamlit as st
 import pandas as pd
 import folium
@@ -7,16 +9,56 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="Vessel Diversion Predictor", layout="wide")
 
 st.title("🚢 Port-to-Port Vessel Tracker & Diversion Risk")
-st.caption("Live ETA vs. Pro-Forma Schedule Delay Calculator")
+st.caption("Live AIS Tracking vs. Pro-Forma Schedule Delay Calculator")
 
-# 1. Sidebar Inputs
-st.sidebar.header("Vessel Query")
-vessel_imo = st.sidebar.text_input("Vessel IMO Number", value="9839192") # Example MSC Vessel
+# Sidebar Configuration
+st.sidebar.header("Vessel Query & Credentials")
+API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="59b1c83a8504a344ffb4b008fc007b761c00131a")
+target_mmsi = st.sidebar.text_input("Vessel MMSI Number", value="255805678")
 carrier = st.sidebar.selectbox("Carrier", ["MSC", "Maersk", "CMA CGM", "Hapag-Lloyd"])
 scheduled_delay_hrs = st.sidebar.number_input("Current Known Delay (Hours)", min_value=0, max_value=120, value=38)
 
-# 2. Historical Baseline (Simulated CSV Lookup)
-# In production, load this via: pd.read_csv('historical_routes.csv')
+# Function to fetch live AIS data on demand
+def get_live_vessel_data(mmsi_target, api_key):
+    latest_data = None
+    
+    def on_open(ws):
+        sub_msg = {
+            "APIKey": api_key,
+            "BoundingBoxes": [[[-90, -180], [90, 180]]],
+            "FiltersShipMMSI": [str(mmsi_target)],
+            "FilterMessageTypes": ["PositionReport"]
+        }
+        ws.send(json.dumps(sub_msg))
+
+    def on_message(ws, message):
+        nonlocal latest_data
+        data = json.loads(message)
+        if data.get("MessageType") == "PositionReport":
+            pos = data.get("Message", {}).get("PositionReport", {})
+            meta = data.get("MetaData", {})
+            
+            latest_data = {
+                "ship_name": meta.get("ShipName", "Unknown").strip(),
+                "lat": pos.get("Latitude"),
+                "lon": pos.get("Longitude"),
+                "sog": pos.get("SOG")
+            }
+            ws.close()
+
+    try:
+        ws = websocket.WebSocketApp(
+            "wss://stream.aisstream.io/v0/stream",
+            on_open=on_open,
+            on_message=on_message
+        )
+        ws.run_forever(timeout=5)
+    except Exception as e:
+        st.error(f"Connection error: {e}")
+        
+    return latest_data
+
+# Historical Baseline Lookup Data
 historical_data = {
     "MSC": {"delay_threshold": 36, "base_omission_rate": 0.65, "barge_delay_days": 3.5},
     "Maersk": {"delay_threshold": 24, "base_omission_rate": 0.35, "barge_delay_days": 2.0},
@@ -26,21 +68,37 @@ historical_data = {
 
 carrier_stats = historical_data.get(carrier)
 
-# 3. Probability Calculation Engine
+# Probability Calculation Engine
 def calculate_risk(delay, stats):
     threshold = stats["delay_threshold"]
     base_rate = stats["base_omission_rate"]
-    
     if delay < 12:
-        return 5.0  # Very low risk of skipping port
-    
-    # Calculate scaled probability based on historical carrier behavior
+        return 5.0
     calculated_prob = min(95.0, (delay / threshold) * (base_rate * 100))
     return round(calculated_prob, 1)
 
 diversion_prob = calculate_risk(scheduled_delay_hrs, carrier_stats)
 
-# 4. Dashboard Metrics Display
+# Trigger Live Fetch via Button
+live_result = None
+if st.sidebar.button("Fetch Live AIS Position"):
+    if API_KEY == "YOUR_AISSTREAM_API_KEY_HERE" or not API_KEY:
+        st.warning("Please enter a valid Aisstream API key in the sidebar.")
+    else:
+        with st.spinner("Connecting to live AIS satellite/terrestrial stream..."):
+            live_result = get_live_vessel_data(target_mmsi, API_KEY)
+            if live_result:
+                st.success(f"Successfully tracked: {live_result['ship_name']}")
+            else:
+                st.warning("No recent signal found for this MMSI. Ensure the ship is currently active.")
+
+# Default coordinates if live fetch hasn't occurred yet
+vessel_lat = live_result['lat'] if live_result and live_result['lat'] else 50.123
+vessel_lon = live_result['lon'] if live_result and live_result['lon'] else -0.456
+vessel_name_display = live_result['ship_name'] if live_result and live_result['ship_name'] else f"IMO / MMSI: {target_mmsi}"
+current_speed = f"{live_result['sog']} knots" if live_result and 'sog' in live_result else "Unknown (Click Fetch)"
+
+# Dashboard Metrics Display
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -58,21 +116,20 @@ with col3:
     est_added_days = carrier_stats["barge_delay_days"] if diversion_prob > 50 else 0
     st.metric(label="Est. Added Supply Chain Delay", value=f"+{est_added_days} Days (Barge/Feeder)")
 
-# 5. Visual Status & Map Integration
-st.subheader("Route Status & Vessel Location")
+# Visual Status & Map Integration
+st.subheader(f"Vessel Status: {vessel_name_display}")
+st.text(f"Current Speed Over Ground: {current_speed}")
 
 if diversion_prob > 50:
-    st.error(f"⚠️ **High Probability of Diversion:** {carrier} is historically prone to skipping London Gateway when delayed over {carrier_stats['delay_threshold']} hours. Vessel is likely to sail directly to Rotterdam.")
+    st.error(f"⚠️ **High Probability of Diversion:** {carrier} historically skips London Gateway when delayed over {carrier_stats['delay_threshold']} hours.")
 else:
     st.success("✅ **Normal Schedule Expected:** Delay is within operational buffer limits for London Gateway call.")
 
-# Interactive Map (Mock coordinates near English Channel)
-vessel_lat, vessel_lon = 50.123, -0.456  # English Channel
+# Interactive Map Rendering
 m = folium.Map(location=[51.2, 1.5], zoom_start=7)
-
-# Add Markers for Ports and Ship
 folium.Marker([51.505, 0.465], popup="London Gateway", icon=folium.Icon(color="blue", icon="anchor")).add_to(m)
 folium.Marker([51.95, 4.12], popup="Port of Rotterdam", icon=folium.Icon(color="green", icon="anchor")).add_to(m)
-folium.Marker([vessel_lat, vessel_lon], popup=f"IMO: {vessel_imo} ({carrier})", icon=folium.Icon(color="red", icon="ship")).add_to(m)
+folium.Marker([vessel_lat, vessel_lon], popup=vessel_name_display, icon=folium.Icon(color="red", icon="ship")).add_to(m)
 
 st_folium(m, width=900, height=400)
+
