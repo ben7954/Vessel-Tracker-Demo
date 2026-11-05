@@ -18,7 +18,7 @@ target_mmsi = st.sidebar.text_input("Vessel MMSI Number", value="255805678")
 carrier = st.sidebar.selectbox("Carrier", ["MSC", "Maersk", "CMA CGM", "Hapag-Lloyd"])
 scheduled_delay_hrs = st.sidebar.number_input("Current Known Delay (Hours)", min_value=0, max_value=120, value=38)
 
-# Function to fetch live AIS data on demand
+# Function to fetch live AIS data on demand (Fixed timeout handling)
 def get_live_vessel_data(mmsi_target, api_key):
     latest_data = None
     
@@ -52,7 +52,8 @@ def get_live_vessel_data(mmsi_target, api_key):
             on_open=on_open,
             on_message=on_message
         )
-        ws.run_forever(timeout=5)
+        # run_forever without the invalid timeout argument
+        ws.run_forever()
     except Exception as e:
         st.error(f"Connection error: {e}")
         
