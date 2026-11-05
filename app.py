@@ -13,7 +13,7 @@ st.caption("Live AIS Tracking vs. Pro-Forma Schedule Delay Calculator")
 
 # Sidebar Configuration
 st.sidebar.header("Vessel Query & Credentials")
-API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="YOUR_AISSTREAM_API_KEY_HERE")
+API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="59b1c83a8504a344ffb4b008fc007b761c00131a")
 target_mmsi = st.sidebar.text_input("Vessel MMSI Number", value="255805678")
 carrier = st.sidebar.selectbox("Carrier", ["MSC", "Maersk", "CMA CGM", "Hapag-Lloyd"])
 scheduled_delay_hrs = st.sidebar.number_input("Current Known Delay (Hours)", min_value=0, max_value=120, value=38)
@@ -90,7 +90,7 @@ diversion_prob = calculate_risk(scheduled_delay_hrs, carrier_stats)
 
 # Trigger Live Fetch via Button
 if st.sidebar.button("Fetch Last Known / Live Position"):
-    if API_KEY == "YOUR_AISSTREAM_API_KEY_HERE" or not API_KEY:
+    if API_KEY == "59b1c83a8504a344ffb4b008fc007b761c00131a" or not API_KEY:
         st.warning("Please enter a valid Aisstream API key in the sidebar.")
     else:
         with st.spinner("Querying AIS stream for latest position report..."):
