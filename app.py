@@ -90,7 +90,7 @@ diversion_prob = calculate_risk(scheduled_delay_hrs, carrier_stats)
 
 # Trigger Live Fetch via Button
 if st.sidebar.button("Fetch Last Known / Live Position"):
-    if API_KEY == "59b1c83a8504a344ffb4b008fc007b761c00131a" or not API_KEY:
+    if API_KEY == "YOUR_AISSTREAM_API_KEY_HERE" or not API_KEY:
         st.warning("Please enter a valid Aisstream API key in the sidebar.")
     else:
         with st.spinner("Querying AIS stream for latest position report..."):
