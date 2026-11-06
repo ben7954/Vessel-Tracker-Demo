@@ -1,145 +1,150 @@
-import json
-import websocket
 import streamlit as st
 import pandas as pd
-import folium
-from streamlit_folium import st_folium
+import plotly.express as px
+from datetime import datetime
+import numpy as np
+import os
 
-# Page Configuration
-st.set_page_config(page_title="Vessel Diversion Predictor", layout="wide")
+st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", layout="wide")
 
-st.title("🚢 Port-to-Port Vessel Tracker & Diversion Risk")
-st.caption("Live AIS Tracking vs. Pro-Forma Schedule Delay Calculator")
+st.title("🚢 European Corridor Vessel Tracker & Predictive Dashboard")
+st.markdown("Tracking vessels across Gibraltar, Bay of Biscay, and Northern Europe with dead-reckoning trajectory estimation, destination mapping, and ETA countdowns.")
 
-# Sidebar Configuration
-st.sidebar.header("Vessel Query & Credentials")
-API_KEY = st.sidebar.text_input("Aisstream API Key", type="password", value="59b1c83a8504a344ffb4b008fc007b761c00131a")
-target_mmsi = st.sidebar.text_input("Vessel MMSI Number", value="255805678")
-carrier = st.sidebar.selectbox("Carrier", ["MSC", "Maersk", "CMA CGM", "Hapag-Lloyd"])
-scheduled_delay_hrs = st.sidebar.number_input("Current Known Delay (Hours)", min_value=0, max_value=120, value=38)
+CSV_FILE = "vessel_history.csv"
+STATIC_CSV_FILE = "vessel_metadata.csv"
 
-# Function to fetch live AIS data on demand (Fixed timeout handling)
-def get_live_vessel_data(mmsi_target, api_key):
-    latest_data = None
+@st.cache_data(ttl=10)
+def load_data():
+    if not os.path.exists(CSV_FILE):
+        return pd.DataFrame(), pd.DataFrame()
     
-    def on_open(ws):
-        sub_msg = {
-            "APIKey": api_key,
-            "BoundingBoxes": [[[-90, -180], [90, 180]]],
-            "FiltersShipMMSI": [str(mmsi_target)],
-            "FilterMessageTypes": ["PositionReport"]
-        }
-        ws.send(json.dumps(sub_msg))
-
-    def on_message(ws, message):
-        nonlocal latest_data
-        data = json.loads(message)
-        if data.get("MessageType") == "PositionReport":
-            pos = data.get("Message", {}).get("PositionReport", {})
-            meta = data.get("MetaData", {})
-            
-            latest_data = {
-                "ship_name": meta.get("ShipName", "Unknown").strip(),
-                "lat": pos.get("Latitude"),
-                "lon": pos.get("Longitude"),
-                "sog": pos.get("SOG")
-            }
-            ws.close()
-
-    try:
-        ws = websocket.WebSocketApp(
-            "wss://stream.aisstream.io/v0/stream",
-            on_open=on_open,
-            on_message=on_message
-        )
-        # run_forever without the invalid timeout argument
-        ws.run_forever()
-    except Exception as e:
-        st.error(f"Connection error: {e}")
+    df = pd.read_csv(CSV_FILE)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    
+    meta_df = pd.DataFrame(columns=["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute", "timestamp"])
+    if os.path.exists(STATIC_CSV_FILE):
+        meta_df = pd.read_csv(STATIC_CSV_FILE)
+        meta_df = meta_df.sort_values("timestamp").drop_duplicates(subset=["mmsi"], keep="last")
         
-    return latest_data
+    return df, meta_df
 
-# Initialize session state to remember the last known position across clicks
-if "vessel_cache" not in st.session_state:
-    st.session_state.vessel_cache = {
-        "lat": 51.45,
-        "lon": 0.50,
-        "ship_name": "No vessel loaded yet",
-        "sog": "0.0"
-    }
+df, meta_df = load_data()
 
-# Historical Baseline Lookup Data
-historical_data = {
-    "MSC": {"delay_threshold": 36, "base_omission_rate": 0.65, "barge_delay_days": 3.5},
-    "Maersk": {"delay_threshold": 24, "base_omission_rate": 0.35, "barge_delay_days": 2.0},
-    "CMA CGM": {"delay_threshold": 30, "base_omission_rate": 0.50, "barge_delay_days": 3.0},
-    "Hapag-Lloyd": {"delay_threshold": 28, "base_omission_rate": 0.40, "barge_delay_days": 2.5},
-}
-
-carrier_stats = historical_data.get(carrier)
-
-# Probability Calculation Engine
-def calculate_risk(delay, stats):
-    threshold = stats["delay_threshold"]
-    base_rate = stats["base_omission_rate"]
-    if delay < 12:
-        return 5.0
-    calculated_prob = min(95.0, (delay / threshold) * (base_rate * 100))
-    return round(calculated_prob, 1)
-
-diversion_prob = calculate_risk(scheduled_delay_hrs, carrier_stats)
-
-# Trigger Live Fetch via Button
-if st.sidebar.button("Fetch Last Known / Live Position"):
-    if API_KEY == "YOUR_AISSTREAM_API_KEY_HERE" or not API_KEY:
-        st.warning("Please enter a valid Aisstream API key in the sidebar.")
+if df.empty:
+    st.warning("⚠️ No vessel position data found in `vessel_history.csv` yet. Make sure your `logger.py` is running.")
+else:
+    # Merge destination metadata if available
+    if not meta_df.empty:
+        df = pd.merge(df, meta_df[["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute"]], on="mmsi", how="left")
     else:
-        with st.spinner("Querying AIS stream for latest position report..."):
-            live_result = get_live_vessel_data(target_mmsi, API_KEY)
-            if live_result and live_result.get('lat'):
-                st.session_state.vessel_cache = live_result
-                st.success(f"Updated position for: {live_result['ship_name']}")
-            else:
-                st.info("Live ping timed out. Holding onto the last known position from cache.")
+        df["destination"] = "Unknown"
+        df["eta_month"] = 0
+        df["eta_day"] = 0
+        df["eta_hour"] = 24
+        df["eta_minute"] = 60
 
-# Use cached coordinates so the map never breaks
-vessel_lat = st.session_state.vessel_cache['lat']
-vessel_lon = st.session_state.vessel_cache['lon']
-vessel_name_display = st.session_state.vessel_cache['ship_name']
-current_speed = f"{st.session_state.vessel_cache.get('sog', '0')} knots"
+    df["destination"] = df["destination"].fillna("Unknown")
 
-# Dashboard Metrics Display
-col1, col2, col3 = st.columns(3)
+    st.sidebar.header("Dashboard Controls")
+    selected_ship = st.sidebar.selectbox("Filter Vessel", ["All Vessels"] + list(df["ship_name"].unique()))
 
-with col1:
-    st.metric(label="Calculated Delay", value=f"{scheduled_delay_hrs} Hours")
+    if selected_ship != "All Vessels":
+        filtered_df = df[df["ship_name"] == selected_ship]
+    else:
+        filtered_df = df
 
-with col2:
-    st.metric(
-        label="London Gateway Omission Risk", 
-        value=f"{diversion_prob}%",
-        delta="HIGH RISK" if diversion_prob > 50 else "LOW RISK",
-        delta_color="inverse"
+    # --- Dead Reckoning & ETA Countdown Calculation ---
+    now = datetime.now()
+    projected_rows = []
+
+    for mmsi, group in df.groupby("mmsi"):
+        latest = group.sort_values("timestamp").iloc[-1].copy()
+        
+        # Dead Reckoning projection based on elapsed time since last ping
+        hours_elapsed = (now - latest["timestamp"]).total_seconds() / 3600.0
+        
+        if hours_elapsed > 0.1 and pd.notnull(latest["cog"]) and pd.notnull(latest["speed_over_ground"]):
+            distance_nm = latest["speed_over_ground"] * hours_elapsed
+            distance_deg = distance_nm / 60.0
+            angle_rad = np.radians(latest["cog"])
+            
+            latest["latitude"] += distance_deg * np.cos(angle_rad)
+            latest["longitude"] += (distance_deg * np.sin(angle_rad)) / np.cos(np.radians(latest["latitude"]))
+            latest.loc["tracking_status"] = f"Predicted (+{hours_elapsed:.1f}h est.)"
+        else:
+            latest.loc["tracking_status"] = "Live / Recent"
+            
+        # Calculate ETA countdown
+        eta_str = "Not Available"
+        try:
+            m_val = int(latest.get("eta_month", 0))
+            d_val = int(latest.get("eta_day", 0))
+            h_val = int(latest.get("eta_hour", 24))
+            min_val = int(latest.get("eta_minute", 60))
+            
+            if 1 <= m_val <= 12 and 1 <= d_val <= 31:
+                current_year = now.year
+                eta_dt = datetime(current_year, m_val, d_val, h_val if h_val < 24 else 0, min_val if min_val < 60 else 0)
+                if eta_dt < now:
+                    eta_dt = datetime(current_year + 1, m_val, d_val, h_val if h_val < 24 else 0, min_val if min_val < 60 else 0)
+                
+                remaining = eta_dt - now
+                days = remaining.days
+                hours = remaining.seconds // 3600
+                eta_str = f"{days}d {hours}h remaining ({eta_dt.strftime('%b %d %H:%M')})"
+        except Exception:
+            eta_str = "Unknown"
+            
+        latest["eta_countdown"] = eta_str
+        projected_rows.append(latest)
+
+    proj_df = pd.DataFrame(projected_rows)
+
+    # --- Summary Metrics ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
+    col2.metric("Total Position Logs", len(df))
+    col3.metric("Active Corridors", "Gibraltar -> Biscay -> Channel")
+
+    # --- Plotly Visualization (Grid View) ---
+    st.subheader("Vessel Route Trails & Dead-Reckoning Estimates")
+    
+    fig = px.scatter(
+        filtered_df,
+        x="longitude",
+        y="latitude",
+        color="ship_name",
+        hover_data=["mmsi", "speed_over_ground", "timestamp", "cog", "destination"],
+        title="Historical Tracks & Corridor Positions",
+        labels={"longitude": "Longitude (°)", "latitude": "Latitude (°)"}
     )
 
-with col3:
-    est_added_days = carrier_stats["barge_delay_days"] if diversion_prob > 50 else 0
-    st.metric(label="Est. Added Supply Chain Delay", value=f"+{est_added_days} Days (Barge/Feeder)")
+    # Add projected dead reckoning markers with Destination & ETA tooltips
+    if not proj_df.empty:
+        fig.add_scatter(
+            x=proj_df["longitude"],
+            y=proj_df["latitude"],
+            mode="markers+text",
+            text=proj_df["ship_name"],
+            textposition="top center",
+            marker=dict(size=14, symbol="x", color="red"),
+            customdata=np.stack((proj_df["destination"], proj_df["eta_countdown"], proj_df["tracking_status"]), axis=-1),
+            hovertemplate="<b>%{text}</b><br>Destination: %{customdata[0]}<br>ETA: %{customdata[1]}<br>Status: %{customdata[2]}<br>Lat/Lon: (%{y:.2f}, %{x:.2f})<extra></extra>",
+            name="Estimated Position (Dead Reckoning)"
+        )
 
-# Visual Status & Map Integration
-st.subheader(f"Vessel Status: {vessel_name_display}")
-st.text(f"Current Speed Over Ground: {current_speed}")
+    fig.update_yaxes(scaleanchor="x", scaleratio=1)
+    fig.update_layout(height=650, margin={"r": 20, "t": 40, "l": 20, "b": 20})
+    
+    st.plotly_chart(fig, use_container_width=True)
 
-if diversion_prob > 50:
-    st.error(f"⚠️ **High Probability of Diversion:** {carrier} historically skips London Gateway when delayed over {carrier_stats['delay_threshold']} hours.")
-else:
-    st.success("✅ **Normal Schedule Expected:** Delay is within operational buffer limits for London Gateway call.")
+    # --- Active Vessel Status Table ---
+    st.subheader("Current Vessel Status, Destinations & ETAs")
+    display_table = proj_df[["ship_name", "mmsi", "destination", "eta_countdown", "speed_over_ground", "tracking_status", "timestamp"]].copy()
+    display_table.columns = ["Ship Name", "MMSI", "Destination", "ETA Countdown", "Speed (knots)", "Status", "Last Ping"]
+    st.dataframe(display_table, use_container_width=True)
 
-# Interactive Map Rendering
-m = folium.Map(location=[51.2, 1.5], zoom_start=7)
-folium.Marker([51.505, 0.465], popup="London Gateway", icon=folium.Icon(color="blue", icon="anchor")).add_to(m)
-folium.Marker([51.95, 4.12], popup="Port of Rotterdam", icon=folium.Icon(color="green", icon="anchor")).add_to(m)
-folium.Marker([vessel_lat, vessel_lon], popup=vessel_name_display, icon=folium.Icon(color="red", icon="ship")).add_to(m)
-
-st_folium(m, width=900, height=400)
+    # --- Raw Logged Data Expander ---
+    with st.expander("View Full Raw Historical Logs"):
+        st.dataframe(filtered_df.sort_values("timestamp", ascending=False))
 
