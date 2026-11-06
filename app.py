@@ -10,7 +10,7 @@ st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", la
 st.title("🚢 European Corridor Vessel Tracker & Predictive Dashboard")
 st.markdown("Tracking vessels across Gibraltar, Bay of Biscay, and Northern Europe with dead-reckoning trajectory estimation, destination mapping, and ETA countdowns.")
 
-CSV_FILE = "vessel_history.csv"
+CSV_FILE = "vessel_historyv1.csv"
 STATIC_CSV_FILE = "vessel_metadata.csv"
 
 @st.cache_data(ttl=10)
