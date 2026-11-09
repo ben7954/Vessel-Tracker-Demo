@@ -3,11 +3,12 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+import pydeck as pdk
 
 st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", layout="wide")
 
 st.title("🚢 European Corridor Vessel Tracker & Predictive Dashboard")
-st.markdown("Tracking vessels across Gibraltar, Bay of Biscay, and Northern Europe with dead-reckoning trajectory estimation, destination mapping, and ETA countdowns.")
+st.markdown("Tracking container vessels with color-coded dead-reckoning trajectories, speed telemetry, and rich hover tooltips.")
 
 CSV_FILE = "vessel_historyv1.csv"
 STATIC_CSV_FILE = "vessel_metadata.csv"
@@ -33,9 +34,14 @@ df, meta_df = load_data()
 if df.empty:
     st.warning("⚠️ No vessel position data found in `vessel_history.csv` yet. Make sure your `logger.py` is running.")
 else:
-    # Ensure mmsi is string for clean matching
     df["mmsi"] = df["mmsi"].astype(str)
     
+    # Ensure speed column is numeric
+    if "speed_over_ground" in df.columns:
+        df["speed_over_ground"] = pd.to_numeric(df["speed_over_ground"], errors="coerce").fillna(0.0)
+    else:
+        df["speed_over_ground"] = 0.0
+
     # Merge destination metadata if available
     if not meta_df.empty:
         meta_df["mmsi"] = meta_df["mmsi"].astype(str)
@@ -49,41 +55,61 @@ else:
 
     df["destination"] = df["destination"].fillna("Unknown")
 
-    # --- Sidebar Search Controls ---
+    # --- Sidebar Controls & Filters ---
     st.sidebar.header("Dashboard Controls")
-    search_query = st.sidebar.text_input("🔍 Search Vessel Name or MMSI", "").strip().lower()
+    
+    search_query = st.sidebar.text_input("🔍 Search Name or MMSI", "").strip().lower()
 
-    # Filter DataFrame based on search input
+    liner_filter = st.sidebar.multiselect(
+        "🚢 Filter by Shipping Line",
+        ["MAERSK", "MSC", "CMA CGM", "HAPAG-LLOYD", "ONE", "EVERGREEN"],
+        default=[]
+    )
+
+    cargo_only = st.sidebar.checkbox("📦 Show Container / Cargo Vessels Only", value=False)
+
+    filtered_df = df.copy()
     if search_query:
-        filtered_df = df[
-            df["ship_name"].str.lower().str.contains(search_query, na=False) | 
-            df["mmsi"].str.lower().str.contains(search_query, na=False)
+        filtered_df = filtered_df[
+            filtered_df["ship_name"].str.lower().str.contains(search_query, na=False) | 
+            filtered_df["mmsi"].str.lower().str.contains(search_query, na=False)
         ]
-    else:
-        filtered_df = df
+    
+    if liner_filter:
+        pattern = "|".join([liner.lower() for liner in liner_filter])
+        filtered_df = filtered_df[filtered_df["ship_name"].str.lower().str.contains(pattern, na=False)]
 
-    # --- Dead Reckoning & ETA Countdown Calculation ---
+    if cargo_only:
+        container_keywords = ["maersk", "msc", "cma", "hapag", "evergreen", "express", "container", "feeder", "spirit", "leader"]
+        pattern = "|".join(container_keywords)
+        filtered_df = filtered_df[filtered_df["ship_name"].str.lower().str.contains(pattern, na=False)]
+
+    # --- Dead Reckoning, Speed & ETA Calculation ---
     now = datetime.now()
     projected_rows = []
 
     for mmsi, group in df.groupby("mmsi"):
         latest = group.sort_values("timestamp").iloc[-1].copy()
         
-        # Dead Reckoning projection based on elapsed time since last ping
         hours_elapsed = (now - latest["timestamp"]).total_seconds() / 3600.0
         
-        if hours_elapsed > 0.1 and pd.notnull(latest["cog"]) and pd.notnull(latest["speed_over_ground"]):
+        # Dead Reckoning Check & Color Coding
+        if hours_elapsed > 0.1 and pd.notnull(latest["cog"]) and pd.notnull(latest["speed_over_ground"]) and latest["speed_over_ground"] > 0:
             distance_nm = latest["speed_over_ground"] * hours_elapsed
             distance_deg = distance_nm / 60.0
             angle_rad = np.radians(latest["cog"])
             
             latest["latitude"] += distance_deg * np.cos(angle_rad)
             latest["longitude"] += (distance_deg * np.sin(angle_rad)) / np.cos(np.radians(latest["latitude"]))
-            latest.loc["tracking_status"] = f"Predicted (+{hours_elapsed:.1f}h est.)"
+            latest.loc["tracking_status"] = f"Predicted (+{hours_elapsed:.1f}h)"
+            latest.loc["status_color"] = [255, 140, 0, 220]  # Orange for Dead Reckoning
+            latest.loc["marker_size"] = 22000 # Slightly larger for cargo/predicted
         else:
             latest.loc["tracking_status"] = "Live / Recent"
+            latest.loc["status_color"] = [0, 200, 100, 220]  # Green for Live Signal
+            latest.loc["marker_size"] = 15000
             
-        # Calculate ETA countdown
+        # Strict ETA Validation (Fixes 9+ month bugs)
         eta_str = "Not Available"
         try:
             m_val = int(latest.get("eta_month", 0))
@@ -91,6 +117,7 @@ else:
             h_val = int(latest.get("eta_hour", 24))
             min_val = int(latest.get("eta_minute", 60))
             
+            # Valid month (1-12) and day (1-31), ignoring uninitialized 0 or 60 values
             if 1 <= m_val <= 12 and 1 <= d_val <= 31:
                 current_year = now.year
                 eta_dt = datetime(current_year, m_val, d_val, h_val if h_val < 24 else 0, min_val if min_val < 60 else 0)
@@ -100,46 +127,104 @@ else:
                 remaining = eta_dt - now
                 days = remaining.days
                 hours = remaining.seconds // 3600
-                eta_str = f"{days}d {hours}h remaining ({eta_dt.strftime('%b %d %H:%M')})"
+                if days <= 30:  # Reasonable threshold for European corridor
+                    eta_str = f"{days}d {hours}h ({eta_dt.strftime('%b %d %H:%M')})"
         except Exception:
-            eta_str = "Unknown"
+            eta_str = "Not Available"
             
         latest["eta_countdown"] = eta_str
         projected_rows.append(latest)
 
     proj_df = pd.DataFrame(projected_rows)
 
-    # Filter projected table based on search query as well
-    if search_query and not proj_df.empty:
-        proj_filtered = proj_df[
-            proj_df["ship_name"].str.lower().str.contains(search_query, na=False) | 
-            proj_df["mmsi"].str.lower().str.contains(search_query, na=False)
+    # Apply filters to projected table
+    proj_filtered = proj_df.copy()
+    if search_query:
+        proj_filtered = proj_filtered[
+            proj_filtered["ship_name"].str.lower().str.contains(search_query, na=False) | 
+            proj_filtered["mmsi"].str.lower().str.contains(search_query, na=False)
         ]
+    if liner_filter:
+        pattern = "|".join([liner.lower() for liner in liner_filter])
+        proj_filtered = proj_filtered[proj_filtered["ship_name"].str.lower().str.contains(pattern, na=False)]
+    if cargo_only:
+        container_keywords = ["maersk", "msc", "cma", "hapag", "evergreen", "express", "container", "feeder", "spirit", "leader"]
+        pattern = "|".join(container_keywords)
+        proj_filtered = proj_filtered[proj_filtered["ship_name"].str.lower().str.contains(pattern, na=False)]
+
+    # --- Watchlist Session State ---
+    if "saved_vessels" not in st.session_state:
+        st.session_state.saved_vessels = []
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⭐ Saved Watchlist")
+    if st.session_state.saved_vessels:
+        for saved_mmsi in st.session_state.saved_vessels:
+            ship_match = df[df["mmsi"] == saved_mmsi]
+            s_name = ship_match["ship_name"].iloc[-1] if not ship_match.empty else saved_mmsi
+            st.sidebar.text(f"• {s_name}")
+        if st.sidebar.button("Clear Watchlist"):
+            st.session_state.saved_vessels = []
     else:
-        proj_filtered = proj_df
+        st.sidebar.info("No vessels saved yet. Click 'Save' in the table below.")
 
     # --- Summary Metrics ---
     col1, col2, col3 = st.columns(3)
     col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
-    col2.metric("Total Position Logs", len(df))
+    col2.metric("Filtered Vessels Shown", len(proj_filtered))
     col3.metric("Active Corridors", "Gibraltar -> Biscay -> Channel")
 
-    # --- Native Interactive Map View ---
-    st.subheader("🗺️ Native Live Vessel Map")
+    # --- PyDeck Interactive Map with Color Coding & Hover Tooltips ---
+    st.subheader("🗺️ Interactive Vessel Map (Green = Live | Orange = Dead Reckoning)")
+    
     if not proj_filtered.empty:
-        # Streamlit's built-in map uses 'latitude' and 'longitude' columns automatically
-        st.map(proj_filtered, latitude="latitude", longitude="longitude", size=30, color="#ff4b4b")
-    else:
-        st.info("No vessels match your search query on the map.")
+        mid_lat = proj_filtered["latitude"].mean()
+        mid_lon = proj_filtered["longitude"].mean()
 
-    # --- Active Vessel Status Table ---
-    st.subheader("📋 Current Vessel Status, Destinations & ETAs")
-    if not proj_filtered.empty:
-        display_table = proj_filtered[["ship_name", "mmsi", "destination", "eta_countdown", "speed_over_ground", "tracking_status", "timestamp"]].copy()
-        display_table.columns = ["Ship Name", "MMSI", "Destination", "ETA Countdown", "Speed (knots)", "Status", "Last Ping"]
-        st.dataframe(display_table, use_container_width=True)
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=proj_filtered,
+            get_position=["longitude", "latitude"],
+            get_color="status_color",
+            get_radius="marker_size",
+            pickable=True,
+            auto_highlight=True,
+        )
+
+        tooltip_config = {
+            "html": "<b>Vessel:</b> {ship_name}<br/><b>MMSI:</b> {mmsi}<br/><b>Destination:</b> {destination}<br/><b>ETA:</b> {eta_countdown}<br/><b>Speed:</b> {speed_over_ground} knots<br/><b>Status:</b> {tracking_status}",
+            "style": {"backgroundColor": "#1E1E1E", "color": "white", "zIndex": "9999"}
+        }
+
+        view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=5, pitch=0)
+        
+        r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip_config)
+        st.pydeck_chart(r)
     else:
-        st.info("No vessel records found matching your search.")
+        st.info("No vessels match your active filters on the map.")
+
+    # --- Active Vessel Status Table with Speed & Watchlist ---
+    st.subheader("📋 Current Vessel Status, Speed & Watchlist")
+    if not proj_filtered.empty:
+        for idx, row in proj_filtered.iterrows():
+            cols = st.columns([3, 2, 2, 2, 2, 1])
+            cols[0].write(f"**{row['ship_name']}** (MMSI: {row['mmsi']})")
+            cols[1].write(f"Dest: {row['destination']}")
+            cols[2].write(f"ETA: {row['eta_countdown']}")
+            cols[3].write(f"Speed: {row['speed_over_ground']} kn")
+            cols[4].write(f"Status: {row['tracking_status']}")
+            
+            mmsi_val = str(row['mmsi'])
+            is_saved = mmsi_val in st.session_state.saved_vessels
+            btn_label = "★ Saved" if is_saved else "☆ Save"
+            if cols[5].button(btn_label, key=f"save_{mmsi_val}_{idx}"):
+                if is_saved:
+                    st.session_state.saved_vessels.remove(mmsi_val)
+                else:
+                    st.session_state.saved_vessels.append(mmsi_val)
+                st.rerun()
+    else:
+        st.info("No vessel records found matching your filters.")
 
     # --- Raw Logged Data Expander ---
     with st.expander("🔍 View Full Raw Historical Logs"):
