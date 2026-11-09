@@ -8,9 +8,7 @@ import time
 # Replace with your free API key from aisstream.io
 API_KEY = "59b1c83a8504a344ffb4b008fc007b761c00131a"
 
-# List of specific MMSI numbers you want to continuously track
-TARGET_MMSIS = ["255805678", "9839192"]
-
+# NO MORE HARDCODED MMSIS: We are tracking all vessels within the corridor boxes now!
 CSV_FILE = "vessel_historyv1.csv"
 STATIC_CSV_FILE = "vessel_metadata.csv"
 
@@ -27,7 +25,7 @@ def init_csvs():
             writer.writerow(["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute", "timestamp"])
 
 def on_open(ws):
-    print("🔌 Background Logger connected to Aisstream.io. Listening for target vessels in European corridor...")
+    print("🔌 Background Logger connected. Listening to ALL vessels in European corridor boxes...")
     sub_msg = {
         "APIKey": API_KEY,
         "BoundingBoxes": [
@@ -35,7 +33,7 @@ def on_open(ws):
             [[43.5, -5.5], [47.5, -1.0]],    # Bay of Biscay
             [[49.5, -5.0], [52.5, 5.0]]      # English Channel / LGW / Rotterdam
         ],
-        "FiltersShipMMSI": TARGET_MMSIS,
+        # "FiltersShipMMSI" is removed entirely so every vessel in the box is captured!
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
     }
     ws.send(json.dumps(sub_msg))
@@ -59,7 +57,7 @@ def on_message(ws, message):
             with open(CSV_FILE, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([timestamp, mmsi, ship_name, lat, lon, sog, cog])
-            print(f"[{timestamp}] Position Logged: {ship_name} (MMSI: {mmsi}) -> Lat: {lat}, Lon: {lon}, SOG: {sog}kn, COG: {cog}°")
+            print(f"[{timestamp}] Position Logged: {ship_name} (MMSI: {mmsi}) -> Lat: {lat}, Lon: {lon}")
 
         elif msg_type == "ShipStaticData":
             static = data.get("Message", {}).get("ShipStaticData", {})
@@ -73,7 +71,7 @@ def on_message(ws, message):
             with open(STATIC_CSV_FILE, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([mmsi, destination, month, day, hour, minute, timestamp])
-            print(f"[{timestamp}] Static Data Logged: {ship_name} (MMSI: {mmsi}) -> Destination: {destination}, ETA: {month}/{day} {hour}:{minute}")
+            print(f"[{timestamp}] Static Data Logged: {ship_name} (MMSI: {mmsi}) -> Destination: {destination}")
 
     except Exception as e:
         print(f"Error parsing message: {e}")
