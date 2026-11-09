@@ -158,3 +158,104 @@ else:
         proj_filtered = proj_filtered[proj_filtered["ship_name"].str.lower().str.contains(pattern, na=False)]
     if cargo_only:
         container_keywords = ["maersk", "msc", "cma", "hapag", "evergreen", "express", "container", "feeder", "spirit", "leader"]
+        pattern = "|".join(container_keywords)
+        proj_filtered = proj_filtered[proj_filtered["ship_name"].str.lower().str.contains(pattern, na=False)]
+
+    # --- Watchlist Session State ---
+    if "saved_vessels" not in st.session_state:
+        st.session_state.saved_vessels = []
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⭐ Saved Watchlist")
+    if st.session_state.saved_vessels:
+        for saved_mmsi in st.session_state.saved_vessels:
+            ship_match = df[df["mmsi"] == saved_mmsi]
+            s_name = ship_match["ship_name"].iloc[-1] if not ship_match.empty else saved_mmsi
+            st.sidebar.text(f"• {s_name}")
+        if st.sidebar.button("Clear Watchlist"):
+            st.session_state.saved_vessels = []
+    else:
+        st.sidebar.info("No vessels saved yet. Click 'Save' in the table below.")
+
+    # --- Summary Metrics ---
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
+    col2.metric("Filtered Vessels Shown", len(proj_filtered))
+    col3.metric("Active Corridors", "Gibraltar -> Finisterre -> Biscay -> Channel")
+
+    # --- PyDeck Interactive Map with Rectangular Hulls & Hover Tooltips ---
+    st.subheader("🗺️ Interactive Vessel Map (Rectangular Hulls)")
+    
+    if not proj_filtered.empty:
+        mid_lat = proj_filtered["latitude"].mean()
+        mid_lon = proj_filtered["longitude"].mean()
+
+        rect_rows = []
+        for _, row in proj_filtered.iterrows():
+            lat = row["latitude"]
+            lon = row["longitude"]
+            lat_size = 0.015  # Length scale
+            lon_size = 0.03   # Width scale
+            
+            polygon = [
+                [lon - lon_size/2, lat - lat_size/2],
+                [lon + lon_size/2, lat - lat_size/2],
+                [lon + lon_size/2, lat + lat_size/2],
+                [lon - lon_size/2, lat + lat_size/2]
+            ]
+            
+            r_data = row.to_dict()
+            r_data["polygon"] = polygon
+            rect_rows.append(r_data)
+            
+        poly_df = pd.DataFrame(rect_rows)
+
+        layer = pdk.Layer(
+            "PolygonLayer",
+            data=poly_df,
+            get_polygon="polygon",
+            get_fill_color="status_color",
+            get_line_color=[255, 255, 255],
+            line_width_min_pixels=1,
+            pickable=True,
+            auto_highlight=True,
+        )
+
+        tooltip_config = {
+            "html": "<b>Vessel:</b> {ship_name}<br/><b>MMSI:</b> {mmsi}<br/><b>Destination:</b> {destination}<br/><b>ETA:</b> {eta_countdown}<br/><b>Speed:</b> {speed_over_ground} knots<br/><b>Status:</b> {tracking_status}",
+            "style": {"backgroundColor": "#1E1E1E", "color": "white", "zIndex": "9999"}
+        }
+
+        view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=5, pitch=0)
+        
+        r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip_config)
+        st.pydeck_chart(r)
+    else:
+        st.info("No vessels match your active filters on the map.")
+
+    # --- Active Vessel Status Table ---
+    st.subheader("📋 Current Vessel Status, Speed & Watchlist")
+    if not proj_filtered.empty:
+        for idx, row in proj_filtered.iterrows():
+            cols = st.columns([3, 2, 2, 2, 2, 1])
+            cols[0].write(f"**{row['ship_name']}** (MMSI: {row['mmsi']})")
+            cols[1].write(f"Dest: {row['destination']}")
+            cols[2].write(f"ETA: {row['eta_countdown']}")
+            cols[3].write(f"Speed: {row['speed_over_ground']} kn")
+            cols[4].write(f"Status: {row['tracking_status']}")
+            
+            mmsi_val = str(row['mmsi'])
+            is_saved = mmsi_val in st.session_state.saved_vessels
+            btn_label = "★ Saved" if is_saved else "☆ Save"
+            if cols[5].button(btn_label, key=f"save_{mmsi_val}_{idx}"):
+                if is_saved:
+                    st.session_state.saved_vessels.remove(mmsi_val)
+                else:
+                    st.session_state.saved_vessels.append(mmsi_val)
+                st.rerun()
+    else:
+        st.info("No vessel records found matching your filters.")
+
+    # --- Raw Logged Data Expander ---
+    with st.expander("🔍 View Full Raw Historical Logs"):
+        st.dataframe(filtered_df.sort_values("timestamp", ascending=False))
