@@ -30,6 +30,7 @@ def on_open(ws):
         "APIKey": API_KEY,
         "BoundingBoxes": [
             [[35.5, -6.0], [37.2, -4.8]],    # Gibraltar / Southern Spain
+            [[42.0, -10.0], [44.0, -8.0]],   # Cape Finisterre (Portugal/Spain approach)
             [[43.5, -5.5], [47.5, -1.0]],    # Bay of Biscay
             [[49.5, -5.0], [52.5, 5.0]]      # English Channel / LGW / Rotterdam
         ],
