@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from datetime import datetime
 import numpy as np
 import os
+from datetime import datetime
 
 st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", layout="wide")
 
@@ -24,6 +23,7 @@ def load_data():
     meta_df = pd.DataFrame(columns=["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute", "timestamp"])
     if os.path.exists(STATIC_CSV_FILE):
         meta_df = pd.read_csv(STATIC_CSV_FILE)
+        meta_df["timestamp"] = pd.to_datetime(meta_df["timestamp"], errors="coerce")
         meta_df = meta_df.sort_values("timestamp").drop_duplicates(subset=["mmsi"], keep="last")
         
     return df, meta_df
@@ -33,8 +33,12 @@ df, meta_df = load_data()
 if df.empty:
     st.warning("⚠️ No vessel position data found in `vessel_history.csv` yet. Make sure your `logger.py` is running.")
 else:
+    # Ensure mmsi is string for clean matching
+    df["mmsi"] = df["mmsi"].astype(str)
+    
     # Merge destination metadata if available
     if not meta_df.empty:
+        meta_df["mmsi"] = meta_df["mmsi"].astype(str)
         df = pd.merge(df, meta_df[["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute"]], on="mmsi", how="left")
     else:
         df["destination"] = "Unknown"
@@ -45,11 +49,16 @@ else:
 
     df["destination"] = df["destination"].fillna("Unknown")
 
+    # --- Sidebar Search Controls ---
     st.sidebar.header("Dashboard Controls")
-    selected_ship = st.sidebar.selectbox("Filter Vessel", ["All Vessels"] + list(df["ship_name"].unique()))
+    search_query = st.sidebar.text_input("🔍 Search Vessel Name or MMSI", "").strip().lower()
 
-    if selected_ship != "All Vessels":
-        filtered_df = df[df["ship_name"] == selected_ship]
+    # Filter DataFrame based on search input
+    if search_query:
+        filtered_df = df[
+            df["ship_name"].str.lower().str.contains(search_query, na=False) | 
+            df["mmsi"].str.lower().str.contains(search_query, na=False)
+        ]
     else:
         filtered_df = df
 
@@ -100,51 +109,38 @@ else:
 
     proj_df = pd.DataFrame(projected_rows)
 
+    # Filter projected table based on search query as well
+    if search_query and not proj_df.empty:
+        proj_filtered = proj_df[
+            proj_df["ship_name"].str.lower().str.contains(search_query, na=False) | 
+            proj_df["mmsi"].str.lower().str.contains(search_query, na=False)
+        ]
+    else:
+        proj_filtered = proj_df
+
     # --- Summary Metrics ---
     col1, col2, col3 = st.columns(3)
     col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
     col2.metric("Total Position Logs", len(df))
     col3.metric("Active Corridors", "Gibraltar -> Biscay -> Channel")
 
-    # --- Plotly Visualization (Grid View) ---
-    st.subheader("Vessel Route Trails & Dead-Reckoning Estimates")
-    
-    fig = px.scatter(
-        filtered_df,
-        x="longitude",
-        y="latitude",
-        color="ship_name",
-        hover_data=["mmsi", "speed_over_ground", "timestamp", "cog", "destination"],
-        title="Historical Tracks & Corridor Positions",
-        labels={"longitude": "Longitude (°)", "latitude": "Latitude (°)"}
-    )
-
-    # Add projected dead reckoning markers with Destination & ETA tooltips
-    if not proj_df.empty:
-        fig.add_scatter(
-            x=proj_df["longitude"],
-            y=proj_df["latitude"],
-            mode="markers+text",
-            text=proj_df["ship_name"],
-            textposition="top center",
-            marker=dict(size=14, symbol="x", color="red"),
-            customdata=np.stack((proj_df["destination"], proj_df["eta_countdown"], proj_df["tracking_status"]), axis=-1),
-            hovertemplate="<b>%{text}</b><br>Destination: %{customdata[0]}<br>ETA: %{customdata[1]}<br>Status: %{customdata[2]}<br>Lat/Lon: (%{y:.2f}, %{x:.2f})<extra></extra>",
-            name="Estimated Position (Dead Reckoning)"
-        )
-
-    fig.update_yaxes(scaleanchor="x", scaleratio=1)
-    fig.update_layout(height=650, margin={"r": 20, "t": 40, "l": 20, "b": 20})
-    
-    st.plotly_chart(fig, use_container_width=True)
+    # --- Native Interactive Map View ---
+    st.subheader("🗺️ Native Live Vessel Map")
+    if not proj_filtered.empty:
+        # Streamlit's built-in map uses 'latitude' and 'longitude' columns automatically
+        st.map(proj_filtered, latitude="latitude", longitude="longitude", size=30, color="#ff4b4b")
+    else:
+        st.info("No vessels match your search query on the map.")
 
     # --- Active Vessel Status Table ---
-    st.subheader("Current Vessel Status, Destinations & ETAs")
-    display_table = proj_df[["ship_name", "mmsi", "destination", "eta_countdown", "speed_over_ground", "tracking_status", "timestamp"]].copy()
-    display_table.columns = ["Ship Name", "MMSI", "Destination", "ETA Countdown", "Speed (knots)", "Status", "Last Ping"]
-    st.dataframe(display_table, use_container_width=True)
+    st.subheader("📋 Current Vessel Status, Destinations & ETAs")
+    if not proj_filtered.empty:
+        display_table = proj_filtered[["ship_name", "mmsi", "destination", "eta_countdown", "speed_over_ground", "tracking_status", "timestamp"]].copy()
+        display_table.columns = ["Ship Name", "MMSI", "Destination", "ETA Countdown", "Speed (knots)", "Status", "Last Ping"]
+        st.dataframe(display_table, use_container_width=True)
+    else:
+        st.info("No vessel records found matching your search.")
 
     # --- Raw Logged Data Expander ---
-    with st.expander("View Full Raw Historical Logs"):
+    with st.expander("🔍 View Full Raw Historical Logs"):
         st.dataframe(filtered_df.sort_values("timestamp", ascending=False))
-
