@@ -8,7 +8,7 @@ import pydeck as pdk
 st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", layout="wide")
 
 st.title("🚢 European Corridor Vessel Tracker & Predictive Dashboard")
-st.markdown("Tracking container vessels with color-coded dead-reckoning trajectories, speed telemetry, and rich hover tooltips.")
+st.markdown("Tracking container vessels with customizable color-coded tracking, speed telemetry, and rich hover tooltips.")
 
 CSV_FILE = "vessel_historyv1.csv"
 STATIC_CSV_FILE = "vessel_metadata.csv"
@@ -55,7 +55,7 @@ else:
 
     df["destination"] = df["destination"].fillna("Unknown")
 
-    # --- Sidebar Controls & Filters ---
+    # --- Sidebar Controls & Custom Color Pickers ---
     st.sidebar.header("Dashboard Controls")
     
     search_query = st.sidebar.text_input("🔍 Search Name or MMSI", "").strip().lower()
@@ -67,6 +67,19 @@ else:
     )
 
     cargo_only = st.sidebar.checkbox("📦 Show Container / Cargo Vessels Only", value=False)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎨 Map Color Customizer")
+    live_color_hex = st.sidebar.color_picker("Live Signal Color", "#00C864")
+    pred_color_hex = st.sidebar.color_picker("Dead Reckoning Color", "#FF8C00")
+
+    # Helper to convert hex to RGB list for PyDeck
+    def hex_to_rgb(hex_str):
+        hex_str = hex_str.lstrip('#')
+        return [int(hex_str[i:i+2], 16) for i in (0, 2, 4)] + [220]
+
+    live_rgb = hex_to_rgb(live_color_hex)
+    pred_rgb = hex_to_rgb(pred_color_hex)
 
     filtered_df = df.copy()
     if search_query:
@@ -93,7 +106,7 @@ else:
         
         hours_elapsed = (now - latest["timestamp"]).total_seconds() / 3600.0
         
-        # Dead Reckoning Check & Color Coding
+        # Dead Reckoning & Color Assignment
         if hours_elapsed > 0.1 and pd.notnull(latest["cog"]) and pd.notnull(latest["speed_over_ground"]) and latest["speed_over_ground"] > 0:
             distance_nm = latest["speed_over_ground"] * hours_elapsed
             distance_deg = distance_nm / 60.0
@@ -102,14 +115,14 @@ else:
             latest["latitude"] += distance_deg * np.cos(angle_rad)
             latest["longitude"] += (distance_deg * np.sin(angle_rad)) / np.cos(np.radians(latest["latitude"]))
             latest.loc["tracking_status"] = f"Predicted (+{hours_elapsed:.1f}h)"
-            latest.loc["status_color"] = [255, 140, 0, 220]  # Orange for Dead Reckoning
-            latest.loc["marker_size"] = 22000 # Slightly larger for cargo/predicted
+            latest.loc["status_color"] = pred_rgb
+            latest.loc["marker_size"] = 8000  # Scaled down to prevent giant shapes
         else:
             latest.loc["tracking_status"] = "Live / Recent"
-            latest.loc["status_color"] = [0, 200, 100, 220]  # Green for Live Signal
-            latest.loc["marker_size"] = 15000
+            latest.loc["status_color"] = live_rgb
+            latest.loc["marker_size"] = 6000
             
-        # Strict ETA Validation (Fixes 9+ month bugs)
+        # Strict ETA Validation
         eta_str = "Not Available"
         try:
             m_val = int(latest.get("eta_month", 0))
@@ -117,7 +130,6 @@ else:
             h_val = int(latest.get("eta_hour", 24))
             min_val = int(latest.get("eta_minute", 60))
             
-            # Valid month (1-12) and day (1-31), ignoring uninitialized 0 or 60 values
             if 1 <= m_val <= 12 and 1 <= d_val <= 31:
                 current_year = now.year
                 eta_dt = datetime(current_year, m_val, d_val, h_val if h_val < 24 else 0, min_val if min_val < 60 else 0)
@@ -127,7 +139,7 @@ else:
                 remaining = eta_dt - now
                 days = remaining.days
                 hours = remaining.seconds // 3600
-                if days <= 30:  # Reasonable threshold for European corridor
+                if days <= 30:
                     eta_str = f"{days}d {hours}h ({eta_dt.strftime('%b %d %H:%M')})"
         except Exception:
             eta_str = "Not Available"
@@ -172,10 +184,10 @@ else:
     col1, col2, col3 = st.columns(3)
     col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
     col2.metric("Filtered Vessels Shown", len(proj_filtered))
-    col3.metric("Active Corridors", "Gibraltar -> Biscay -> Channel")
+    col3.metric("Active Corridors", "Gibraltar -> Finisterre -> Biscay -> Channel")
 
-    # --- PyDeck Interactive Map with Color Coding & Hover Tooltips ---
-    st.subheader("🗺️ Interactive Vessel Map (Green = Live | Orange = Dead Reckoning)")
+    # --- PyDeck Interactive Map with Scaled Markers & Hover Tooltips ---
+    st.subheader("🗺️ Interactive Vessel Map")
     
     if not proj_filtered.empty:
         mid_lat = proj_filtered["latitude"].mean()
@@ -203,7 +215,7 @@ else:
     else:
         st.info("No vessels match your active filters on the map.")
 
-    # --- Active Vessel Status Table with Speed & Watchlist ---
+    # --- Active Vessel Status Table ---
     st.subheader("📋 Current Vessel Status, Speed & Watchlist")
     if not proj_filtered.empty:
         for idx, row in proj_filtered.iterrows():
