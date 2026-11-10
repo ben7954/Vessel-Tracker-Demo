@@ -50,8 +50,8 @@ def on_message(ws, message):
             pos = data.get("Message", {}).get("PositionReport", {})
             lat = pos.get("Latitude")
             lon = pos.get("Longitude")
-            sog = pos.get("SOG", 0.0)
-            cog = pos.get("COG", 0.0)
+            sog = pos.get("Sog", 0.0)
+            cog = pos.get("Cog", 0.0)
 
             # Handle missing or invalid AIS speed flags (1023 means speed not available)
             if sog is None or sog == 1023:
