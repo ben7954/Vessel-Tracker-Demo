@@ -8,7 +8,7 @@ import pydeck as pdk
 st.set_page_config(page_title="Maritime Tracking & Dead Reckoning Dashboard", layout="wide")
 
 st.title("🚢 European Corridor Vessel Tracker & Predictive Dashboard")
-st.markdown("Tracking container vessels with rectangular ship hulls, color-coded dead-reckoning trajectories, speed telemetry, and rich hover tooltips.")
+st.markdown("Tracking container vessels with scaled rectangular ship hulls, color-coded dead-reckoning trajectories, speed telemetry, and rich hover tooltips.")
 
 CSV_FILE = "vessel_historyv1.csv"
 STATIC_CSV_FILE = "vessel_metadata.csv"
@@ -183,8 +183,8 @@ else:
     col2.metric("Filtered Vessels Shown", len(proj_filtered))
     col3.metric("Active Corridors", "Gibraltar -> Finisterre -> Biscay -> Channel")
 
-    # --- PyDeck Interactive Map with Rectangular Hulls & Hover Tooltips ---
-    st.subheader("🗺️ Interactive Vessel Map (Rectangular Hulls)")
+    # --- PyDeck Interactive Map with Port-Optimized Rectangular Hulls ---
+    st.subheader("🗺️ Interactive Vessel Map (Port-Optimized Hulls)")
     
     if not proj_filtered.empty:
         mid_lat = proj_filtered["latitude"].mean()
@@ -194,8 +194,10 @@ else:
         for _, row in proj_filtered.iterrows():
             lat = row["latitude"]
             lon = row["longitude"]
-            lat_size = 0.015  # Length scale
-            lon_size = 0.03   # Width scale
+            
+            # Tighter port-scale dimensions to prevent massive overlapping when zoomed in
+            lat_size = 0.0025  # ~0.15 nautical miles length
+            lon_size = 0.005   # ~0.15 nautical miles width
             
             polygon = [
                 [lon - lon_size/2, lat - lat_size/2],
@@ -226,7 +228,7 @@ else:
             "style": {"backgroundColor": "#1E1E1E", "color": "white", "zIndex": "9999"}
         }
 
-        view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=5, pitch=0)
+        view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=7, pitch=0)
         
         r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip_config)
         st.pydeck_chart(r)
