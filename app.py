@@ -21,6 +21,8 @@ def load_data():
 
     df = pd.read_csv(CSV_FILE)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
     df = df.dropna(subset=["timestamp", "latitude", "longitude"])
 
     meta_df = pd.DataFrame(columns=["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute", "timestamp"])
@@ -37,8 +39,8 @@ df, meta_df = load_data()
 if df.empty:
     st.warning("⚠️ No vessel position data found in `vessel_historyv1.csv` yet. Make sure your `logger.py` is running.")
 else:
-    df["mmsi"] = df["mmsi"].astype(str)
-    df["ship_name"] = df["ship_name"].fillna("Unknown").astype(str)
+    df["mmsi"] = df["mmsi"].astype(str).str.strip()
+    df["ship_name"] = df["ship_name"].fillna("Unknown").astype(str).str.strip()
 
     # Ensure speed and course columns are numeric
     if "speed_over_ground" in df.columns:
@@ -53,7 +55,7 @@ else:
 
     # Merge destination metadata if available
     if not meta_df.empty:
-        meta_df["mmsi"] = meta_df["mmsi"].astype(str)
+        meta_df["mmsi"] = meta_df["mmsi"].astype(str).str.strip()
         df = pd.merge(
             df,
             meta_df[["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute"]],
@@ -81,7 +83,7 @@ else:
 
     liner_filter = st.sidebar.multiselect(
         "🚢 Filter by Shipping Line",
-        ["MAERSK", "MSC", "CMA CGM", "HAPAG-LLOYD", "ONE", "EVERGREEN"],
+        ["MAERSK", "MSC", "CMA CGM", "HAPAG-LLOYD", "ONE", "EVERGREEN", "OOCL", "COSCO", "ZIM", "YANG MING"],
         default=[],
     )
 
@@ -104,33 +106,54 @@ else:
 
     live_rgb = hex_to_rgb(live_color_hex, alpha=220)
     pred_rgb = hex_to_rgb(pred_color_hex, alpha=220)
-    track_rgb = hex_to_rgb(track_color_hex, alpha=175)
+    track_rgb = hex_to_rgb(track_color_hex, alpha=190)
+
+    container_keywords = [
+        "maersk",
+        "msc",
+        "cma",
+        "hapag",
+        "evergreen",
+        "oocl",
+        "cosco",
+        "zim",
+        "yang ming",
+        "ym ",
+        "sealand",
+        "express",
+        "container",
+        "feeder",
+        "cargo",
+        "bulk",
+        "box",
+        "spirit",
+        "leader",
+        "bridge",
+        "bay",
+        "stream",
+    ]
 
     def apply_vessel_filters(frame):
         out = frame.copy()
+        names_lower = out["ship_name"].str.lower()
+        mmsi_lower = out["mmsi"].str.lower()
+
         if search_query:
             out = out[
-                out["ship_name"].str.lower().str.contains(search_query, na=False)
-                | out["mmsi"].str.lower().str.contains(search_query, na=False)
+                names_lower.str.contains(search_query, regex=False, na=False)
+                | mmsi_lower.str.contains(search_query, regex=False, na=False)
             ]
+            names_lower = out["ship_name"].str.lower()
+
         if liner_filter:
             pattern = "|".join([liner.lower() for liner in liner_filter])
-            out = out[out["ship_name"].str.lower().str.contains(pattern, na=False)]
+            out = out[names_lower.str.contains(pattern, regex=True, na=False)]
+            names_lower = out["ship_name"].str.lower()
+
         if cargo_only:
-            container_keywords = [
-                "maersk",
-                "msc",
-                "cma",
-                "hapag",
-                "evergreen",
-                "express",
-                "container",
-                "feeder",
-                "spirit",
-                "leader",
-            ]
             pattern = "|".join(container_keywords)
-            out = out[out["ship_name"].str.lower().str.contains(pattern, na=False)]
+            out = out[names_lower.str.contains(pattern, regex=True, na=False)]
+
         return out
 
     filtered_df = apply_vessel_filters(df)
@@ -231,7 +254,7 @@ else:
     active_mmsis = set(proj_filtered["mmsi"].astype(str)) if not proj_filtered.empty else set()
     dr_vectors_filtered = [v for v in dr_vector_rows if v["mmsi"] in active_mmsis]
 
-    # Build historical track paths from filtered_df
+    # Build historical track paths from filtered_df (requires >= 2 distinct points per vessel)
     history_track_rows = []
     if not filtered_df.empty:
         for mmsi, grp in filtered_df.sort_values("timestamp").groupby("mmsi"):
@@ -268,8 +291,8 @@ else:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Unique Vessels Tracked", df["mmsi"].nunique())
     col2.metric("Filtered Vessels Shown", len(proj_filtered))
-    col3.metric("Active DR Vectors", len(dr_vectors_filtered))
-    col4.metric("Active Corridors", "4 Corridors")
+    col3.metric("Historical Tracks (2+ pts)", len(history_track_rows))
+    col4.metric("Active DR Vectors (>6m)", len(dr_vectors_filtered))
 
     # --- PyDeck Interactive Map with Hulls, Historical Tracks & DR Vectors ---
     st.subheader("🗺️ Interactive Vessel Map (Hulls, Tracks & Dead-Reckoning Vectors)")
@@ -356,7 +379,8 @@ else:
         view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=7, pitch=0)
 
         r = pdk.Deck(layers=layers, initial_view_state=view_state, tooltip=tooltip_config)
-        st.pydeck_chart(r)
+        map_key = f"vessel_map_hist_{show_history_tracks}_dr_{show_dr_vectors}"
+        st.pydeck_chart(r, key=map_key, use_container_width=True)
     else:
         st.info("No vessels match your active filters on the map.")
 
