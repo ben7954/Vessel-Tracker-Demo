@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from datetime import datetime, timezone
 import websockets
 
@@ -41,12 +42,22 @@ async def listen_ais():
     }
 
     uri = "wss://stream.aisstream.io/v0/stream"
+    backoff = 5.0
+    max_backoff = 60.0
+
     print(f"Logging live AIS data to {TXT_LOG_FILE} (UTC). Press Ctrl+C to stop.")
 
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as ws:
+            async with websockets.connect(
+                uri,
+                open_timeout=30,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+            ) as ws:
                 await ws.send(json.dumps(subscribe_message))
+                backoff = 5.0
 
                 async for raw_msg in ws:
                     msg = json.loads(raw_msg)
@@ -106,10 +117,21 @@ async def listen_ais():
                         }
                         append_txt_record(record)
 
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            print(f"Connection interrupted ({exc}). Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+            wait_time = round(backoff + random.uniform(0, 2.0), 1)
+            print(f"Connection interrupted ({exc}). Reconnecting in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+            backoff = min(backoff * 2, max_backoff)
+
+
+def main():
+    try:
+        asyncio.run(listen_ais())
+    except KeyboardInterrupt:
+        print(f"\nStopped logging. Data saved in {TXT_LOG_FILE}.")
 
 
 if __name__ == "__main__":
-    asyncio.run(listen_ais())
+    main()
