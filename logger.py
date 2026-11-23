@@ -1,104 +1,115 @@
+import asyncio
 import json
-import websocket
-import csv
 import os
-from datetime import datetime
-import time
+from datetime import datetime, timezone
+import websockets
 
-# Replace with your free API key from aisstream.io
-API_KEY = "59b1c83a8504a344ffb4b008fc007b761c00131a"
+API_KEY = os.getenv("AISSTREAM_API_KEY", "59b1c83a8504a344ffb4b008fc007b761c00131a")
+TXT_LOG_FILE = "ais_pilot_log.txt"
 
-CSV_FILE = "vessel_historyv1.csv"
-STATIC_CSV_FILE = "vessel_metadata.csv"
+# Bounding boxes: [min_lat, min_lon, max_lat, max_lon]
+CORRIDORS = {
+    "gibraltar": [[35.5, -6.5, 36.5, -4.5]],
+    "finisterre": [[42.0, -10.5, 44.0, -8.0]],
+    "bay_of_biscay": [[43.5, -8.0, 48.5, -1.0]],
+    "english_channel": [[48.5, -5.5, 51.5, 2.0]],
+}
 
-def init_csvs():
-    """Ensure the CSV files exist with proper headers."""
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, mode="w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp", "mmsi", "ship_name", "latitude", "longitude", "speed_over_ground", "cog"])
-            
-    if not os.path.exists(STATIC_CSV_FILE):
-        with open(STATIC_CSV_FILE, mode="w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["mmsi", "destination", "eta_month", "eta_day", "eta_hour", "eta_minute", "timestamp"])
+ALL_BOUNDING_BOXES = [box for boxes in CORRIDORS.values() for box in boxes]
 
-def on_open(ws):
-    print("🔌 Background Logger connected. Listening to ALL vessels in European corridor boxes...")
-    sub_msg = {
+
+def identify_corridor(lat, lon):
+    if lat is None or lon is None:
+        return "unknown"
+    for name, boxes in CORRIDORS.items():
+        for min_lat, min_lon, max_lat, max_lon in boxes:
+            if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+                return name
+    return "outside_corridor"
+
+
+def append_txt_record(record: dict, filepath: str = TXT_LOG_FILE):
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+async def listen_ais():
+    subscribe_message = {
         "APIKey": API_KEY,
-        "BoundingBoxes": [
-            [[35.5, -6.0], [37.2, -4.8]],    # Gibraltar / Southern Spain
-            [[42.0, -10.0], [44.0, -8.0]],   # Cape Finisterre (Portugal/Spain approach)
-            [[43.5, -5.5], [47.5, -1.0]],    # Bay of Biscay
-            [[49.5, -5.0], [52.5, 5.0]]      # English Channel / LGW / Rotterdam
-        ],
-        "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
+        "BoundingBoxes": ALL_BOUNDING_BOXES,
+        "FilterMessageTypes": ["PositionReport", "ShipStaticData"],
     }
-    ws.send(json.dumps(sub_msg))
 
-def on_message(ws, message):
-    try:
-        data = json.loads(message)
-        msg_type = data.get("MessageType")
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        meta = data.get("MetaData", {})
-        mmsi = str(meta.get("MMSI"))
-        ship_name = meta.get("ShipName", "Unknown").strip()
+    uri = "wss://stream.aisstream.io/v0/stream"
+    print(f"Logging live AIS data to {TXT_LOG_FILE} (UTC). Press Ctrl+C to stop.")
 
-        if msg_type == "PositionReport":
-            pos = data.get("Message", {}).get("PositionReport", {})
-            lat = pos.get("Latitude")
-            lon = pos.get("Longitude")
-            sog = pos.get("Sog", 0.0)
-            cog = pos.get("Cog", 0.0)
-
-            # Handle missing or invalid AIS speed flags (1023 means speed not available)
-            if sog is None or sog == 1023:
-                sog = 0.0
-
-            with open(CSV_FILE, mode="a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([timestamp, mmsi, ship_name, lat, lon, sog, cog])
-            
-            # Updated print statement to explicitly show speed in the terminal
-            print(f"[{timestamp}] Position Logged: {ship_name} (MMSI: {mmsi}) -> Lat: {lat}, Lon: {lon} | Speed: {sog} kn")
-
-        elif msg_type == "ShipStaticData":
-            static = data.get("Message", {}).get("ShipStaticData", {})
-            destination = static.get("Destination", "Unknown").strip()
-            eta = static.get("Eta", {})
-            month = eta.get("Month", 0)
-            day = eta.get("Day", 0)
-            hour = eta.get("Hour", 24)
-            minute = eta.get("Minute", 60)
-
-            with open(STATIC_CSV_FILE, mode="a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([mmsi, destination, month, day, hour, minute, timestamp])
-            print(f"[{timestamp}] Static Data Logged: {ship_name} (MMSI: {mmsi}) -> Destination: {destination}")
-
-    except Exception as e:
-        print(f"Error parsing message: {e}")
-
-def on_error(ws, error):
-    print(f"❌ WebSocket Error: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    print("🔌 Connection closed. Attempting to reconnect in 5 seconds...")
-
-if __name__ == "__main__":
-    init_csvs()
     while True:
         try:
-            ws = websocket.WebSocketApp(
-                "wss://stream.aisstream.io/v0/stream",
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
-            )
-            ws.run_forever(ping_interval=20, ping_timeout=10)
-        except Exception as e:
-            print(f"Connection dropped: {e}. Reconnecting...")
-            time.sleep(5)
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as ws:
+                await ws.send(json.dumps(subscribe_message))
+
+                async for raw_msg in ws:
+                    msg = json.loads(raw_msg)
+                    msg_type = msg.get("MessageType")
+                    meta = msg.get("MetaData", {})
+                    now_utc = datetime.now(timezone.utc).isoformat()
+
+                    mmsi = str(meta.get("MMSI", "")).strip()
+                    ship_name = (meta.get("ShipName") or "Unknown").strip()
+                    lat = meta.get("latitude")
+                    lon = meta.get("longitude")
+
+                    if msg_type == "PositionReport":
+                        pos = msg.get("Message", {}).get("PositionReport", {})
+                        sog = pos.get("Sog")
+                        cog = pos.get("Cog")
+                        heading = pos.get("TrueHeading")
+                        lat = pos.get("Latitude", lat)
+                        lon = pos.get("Longitude", lon)
+
+                        record = {
+                            "logged_at_utc": now_utc,
+                            "ais_time_utc": meta.get("time_utc"),
+                            "message_type": "PositionReport",
+                            "corridor": identify_corridor(lat, lon),
+                            "mmsi": mmsi,
+                            "imo": meta.get("IMO"),
+                            "ship_name": ship_name,
+                            "latitude": lat,
+                            "longitude": lon,
+                            "speed_over_ground": sog,
+                            "cog": cog,
+                            "heading": heading,
+                        }
+                        append_txt_record(record)
+
+                    elif msg_type == "ShipStaticData":
+                        static = msg.get("Message", {}).get("ShipStaticData", {})
+                        dest = (static.get("Destination") or "").strip()
+                        eta = static.get("Eta", {})
+
+                        record = {
+                            "logged_at_utc": now_utc,
+                            "ais_time_utc": meta.get("time_utc"),
+                            "message_type": "ShipStaticData",
+                            "corridor": identify_corridor(lat, lon),
+                            "mmsi": mmsi,
+                            "imo": static.get("ImoNumber") or meta.get("IMO"),
+                            "ship_name": (static.get("Name") or ship_name).strip(),
+                            "callsign": (static.get("CallSign") or "").strip(),
+                            "destination": dest if dest else "Unknown",
+                            "eta_month": eta.get("Month"),
+                            "eta_day": eta.get("Day"),
+                            "eta_hour": eta.get("Hour"),
+                            "eta_minute": eta.get("Minute"),
+                            "draught": static.get("MaximumStaticDraught"),
+                        }
+                        append_txt_record(record)
+
+        except Exception as exc:
+            print(f"Connection interrupted ({exc}). Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(listen_ais())
