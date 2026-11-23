@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import time
 from datetime import datetime, timezone
 import websockets
 
@@ -35,6 +36,11 @@ def append_txt_record(record: dict, filepath: str = TXT_LOG_FILE):
 
 
 async def listen_ais():
+    if not API_KEY or API_KEY == "YOUR_AISSTREAM_API_KEY":
+        print("[WARN] API_KEY is still set to the placeholder value.")
+    else:
+        print("[OK] API_KEY loaded.")
+
     subscribe_message = {
         "APIKey": API_KEY,
         "BoundingBoxes": ALL_BOUNDING_BOXES,
@@ -44,23 +50,46 @@ async def listen_ais():
     uri = "wss://stream.aisstream.io/v0/stream"
     backoff = 5.0
     max_backoff = 60.0
+    total_logged = 0
 
-    print(f"Logging live AIS data to {TXT_LOG_FILE} (UTC). Press Ctrl+C to stop.")
+    print(f"[START] Logging live AIS data to {TXT_LOG_FILE} (UTC). Press Ctrl+C to stop.")
 
     while True:
+        connected_at = None
+        session_msgs = 0
         try:
+            print("[CONNECTING] Opening WebSocket connection to aisstream.io...")
             async with websockets.connect(
                 uri,
                 open_timeout=30,
-                ping_interval=20,
-                ping_timeout=20,
+                ping_interval=30,
+                ping_timeout=30,
                 close_timeout=10,
             ) as ws:
+                connected_at = time.monotonic()
+                print("[CONNECTED] WebSocket open. Sending corridor subscription...")
                 await ws.send(json.dumps(subscribe_message))
-                backoff = 5.0
+                print("[SUBSCRIBED] Waiting for incoming AIS messages...")
 
                 async for raw_msg in ws:
-                    msg = json.loads(raw_msg)
+                    if isinstance(raw_msg, bytes):
+                        raw_msg = raw_msg.decode("utf-8", errors="replace")
+
+                    try:
+                        msg = json.loads(raw_msg)
+                    except json.JSONDecodeError:
+                        print("[WARN] Skipped non-JSON message frame.")
+                        continue
+
+                    if "error" in msg:
+                        print(f"[STREAM ERROR] {msg['error']}")
+
+                    session_msgs += 1
+                    if session_msgs == 1:
+                        print("[STREAM LIVE] First message received from aisstream.io.")
+                    if session_msgs == 1 or (time.monotonic() - connected_at >= 30):
+                        backoff = 5.0
+
                     msg_type = msg.get("MessageType")
                     meta = msg.get("MetaData", {})
                     now_utc = datetime.now(timezone.utc).isoformat()
@@ -77,12 +106,13 @@ async def listen_ais():
                         heading = pos.get("TrueHeading")
                         lat = pos.get("Latitude", lat)
                         lon = pos.get("Longitude", lon)
+                        corridor = identify_corridor(lat, lon)
 
                         record = {
                             "logged_at_utc": now_utc,
                             "ais_time_utc": meta.get("time_utc"),
                             "message_type": "PositionReport",
-                            "corridor": identify_corridor(lat, lon),
+                            "corridor": corridor,
                             "mmsi": mmsi,
                             "imo": meta.get("IMO"),
                             "ship_name": ship_name,
@@ -93,17 +123,19 @@ async def listen_ais():
                             "heading": heading,
                         }
                         append_txt_record(record)
+                        total_logged += 1
 
                     elif msg_type == "ShipStaticData":
                         static = msg.get("Message", {}).get("ShipStaticData", {})
                         dest = (static.get("Destination") or "").strip()
                         eta = static.get("Eta", {})
+                        corridor = identify_corridor(lat, lon)
 
                         record = {
                             "logged_at_utc": now_utc,
                             "ais_time_utc": meta.get("time_utc"),
                             "message_type": "ShipStaticData",
-                            "corridor": identify_corridor(lat, lon),
+                            "corridor": corridor,
                             "mmsi": mmsi,
                             "imo": static.get("ImoNumber") or meta.get("IMO"),
                             "ship_name": (static.get("Name") or ship_name).strip(),
@@ -116,12 +148,23 @@ async def listen_ais():
                             "draught": static.get("MaximumStaticDraught"),
                         }
                         append_txt_record(record)
+                        total_logged += 1
+
+                    if total_logged % 25 == 0 and total_logged > 0:
+                        print(
+                            f"[SAVED] {total_logged} total records written to {TXT_LOG_FILE} "
+                            f"(latest: {ship_name} [{mmsi}] in {corridor})"
+                        )
 
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            duration = round(time.monotonic() - connected_at, 1) if connected_at else 0.0
             wait_time = round(backoff + random.uniform(0, 2.0), 1)
-            print(f"Connection interrupted ({exc}). Reconnecting in {wait_time}s...")
+            print(
+                f"[DISCONNECTED] After {duration}s ({session_msgs} msgs; {exc}). "
+                f"Reconnecting in {wait_time}s..."
+            )
             await asyncio.sleep(wait_time)
             backoff = min(backoff * 2, max_backoff)
 
@@ -130,7 +173,7 @@ def main():
     try:
         asyncio.run(listen_ais())
     except KeyboardInterrupt:
-        print(f"\nStopped logging. Data saved in {TXT_LOG_FILE}.")
+        print(f"\n[STOPPED] Session ended. Data saved in {TXT_LOG_FILE}.")
 
 
 if __name__ == "__main__":
